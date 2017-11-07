@@ -1,5 +1,4 @@
 
-#include <cuda_runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
@@ -18,15 +17,6 @@ using namespace std;
 
 #define GET_CLOCK(t) if(clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &t) != 0) {fprintf(stderr, "%s (%d): Error in timer.\n", __FILE__, __LINE__); exit(1);}
 #define COMPUTE_DELTA_T(diff, t2, t1) diff = (t2.tv_sec - t1.tv_sec) * 1E9 + (t2.tv_nsec - t1.tv_nsec);
-
-
-#ifdef PINNED
-#define CUDA_ALLOC cudaMallocHost
-#define CUDA_FREE cudaFreeHost
-#else
-#define CUDA_ALLOC cudaMalloc
-#define CUDA_FREE cudaFree
-#endif
 
 
 
@@ -49,20 +39,22 @@ void measure_data_transfer(int NumberOfDoubleValuesAsVector, int NumberOfVectors
 	double **data_host;
 	data_host = (double **) malloc(sizeof(double*) * NumberOfVectors);
 
-	double **data_device;
-	data_device = (double **) malloc(sizeof(double*) * NumberOfVectors);
-
 	for(int i=0;i<NumberOfVectors;i++) {
 		data_host[i] = (double *) malloc(sz);
 	}
 
 	// Allocation on GPU
-	for(int i=0;i<NumberOfVectors;i++) {
-		double *d;
-		CUDA_CHECK(CUDA_ALLOC((void**)&d, sz));
-		data_device[i] = d;
-	}
+	#pragma acc enter data copyin(data_host[0:NumberOfVectors][0:NumberOfDoubleValuesAsVector])
+	// for(int i=0;i<NumberOfVectors;i++) {
+	// 	double *d = data_host[i];
+	// 	#pragma acc enter data create(d[0:NumberOfDoubleValuesAsVector])
+	// }
 
+	for(int i=0;i<NumberOfVectors; i++) {
+		for(int j=0;j<NumberOfDoubleValuesAsVector; j++) {
+			data_host[i][j] = i*j;
+		}
+	}
 
 
 	for(int q=0;q < OuterIterationCount; q++) {
@@ -71,20 +63,28 @@ void measure_data_transfer(int NumberOfDoubleValuesAsVector, int NumberOfVectors
 		GET_CLOCK(t1);
 		// Host to device
 		for(int i=0;i<InnerIterationCount;i++) {
-			CUDA_CHECK(cudaMemcpy(data_device[i % NumberOfVectors], data_host[i % NumberOfVectors], sz, cudaMemcpyHostToDevice));
-			CUDA_CHECK(cudaDeviceSynchronize());
+			int index = i % NumberOfVectors;
+			#pragma acc update device(data_host[index:1][0:NumberOfDoubleValuesAsVector]) async
+			#pragma acc wait
 		}
 		GET_CLOCK(t2);
 		COMPUTE_DELTA_T(diff, t2, t1);
 		timings_h2d->push_back(diff / InnerIterationCount);
 
+		#pragma acc parallel loop collapse(2) gang vector present(data_host[0:1][0:1])
+		for(int i=0;i<NumberOfVectors; i++) {
+			for(int j=0;j<NumberOfDoubleValuesAsVector; j++) {
+				data_host[i][j] = i*j;
+			}
+		}
 
 
 		GET_CLOCK(t1);
 		// Device to host
 		for(int i=0;i<InnerIterationCount;i++) {
-			CUDA_CHECK(cudaMemcpy(data_host[i % NumberOfVectors], data_device[i % NumberOfVectors], sz, cudaMemcpyDeviceToHost));
-			CUDA_CHECK(cudaDeviceSynchronize());
+			int index = i % NumberOfVectors;
+			#pragma acc update host(data_host[index:1][0:NumberOfDoubleValuesAsVector]) async
+			#pragma acc wait
 		}
 		GET_CLOCK(t2);
 		COMPUTE_DELTA_T(diff, t2, t1);
@@ -95,14 +95,12 @@ void measure_data_transfer(int NumberOfDoubleValuesAsVector, int NumberOfVectors
 
 
 
+	#pragma acc exit data delete(data_host[0:NumberOfVectors][0:NumberOfDoubleValuesAsVector])
 	for(int i=0;i<NumberOfVectors;i++) {
 		free(data_host[i]);
-		CUDA_FREE(data_device[i]);
 	}
 
 	free(data_host);
-	free(data_device);
-
 
 }
 
@@ -137,7 +135,7 @@ int main(int argc, char **argv) {
 	vector<double> timings_d2h, timings_h2d;
 
 	fprintf(stderr, "Warmup...\n");
-	measure_data_transfer(NumberOfDoubleValuesAsVector, NumberOfVectors, 5, 5, &timings_h2d, &timings_d2h)	;
+	measure_data_transfer(NumberOfDoubleValuesAsVector, NumberOfVectors, 1, 1, &timings_h2d, &timings_d2h)	;
 	fprintf(stderr, "Warmup...Done\n");
 
 	timings_h2d.clear();

@@ -5,5 +5,7 @@
 *.cubin
 *.fatbin
 a.out
-bw
-bandwidthtest
+bw 
+bw-pinned 
+bw-acc 
+bw-acc-pinned 
